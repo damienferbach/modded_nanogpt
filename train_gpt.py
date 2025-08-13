@@ -6,9 +6,15 @@ import uuid
 import time
 import copy
 import glob
+import argparse
 from dataclasses import dataclass
 from functools import lru_cache, partial # Added partial for hook registration
 from pathlib import Path
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -534,6 +540,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, align_to_
     file_iter = iter(files) # use itertools.cycle(files) instead if you want to do multi-epoch training
     tokens, pos = _load_data_shard(next(file_iter)), 0
     max_batch_span = 2 * batch_size if align_to_bos else batch_size # provide buffer to handle samples up to length local_batch_size
+    #max_batch_span = 4 * batch_size if align_to_bos else batch_size # provide buffer to handle samples up to length local_batch_size. Used for 4 GPUs because batch-size was reduced
     while True:
         if pos + max_batch_span + 1 >= len(tokens):
             tokens, pos = _load_data_shard(next(file_iter)), 0
@@ -555,23 +562,42 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, align_to_
 @dataclass
 class Hyperparameters:
     # data
-    train_files = "data/fineweb10B/fineweb_train_*.bin" # input .bin to train on
-    val_files = "data/fineweb10B/fineweb_val_*.bin" # input .bin to eval validation loss on
+    # train_files = "data/fineweb10B/fineweb_train_*.bin" # input .bin to train on
+    # val_files = "data/fineweb10B/fineweb_val_*.bin" # input .bin to eval validation loss on
+    train_files = "data/finewebedu10B/finewebedu_train_*.bin" # input .bin to train on ADDED
+    val_files = "data/finewebedu10B/finewebedu_val_*.bin" # input .bin to eval validation loss on ADDED
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     train_seq_len = 48*1024 # FlexAttention sequence length
     val_seq_len = 4*64*1024 # FlexAttention sequence length for validation
+    # train_seq_len = 24*1024 # FlexAttention sequence length (reduced for 4 GPUs)
+    # val_seq_len = 2*64*1024 # FlexAttention sequence length for validation (reduced for 4 GPUs)
     # optimization
-    num_iterations = 1750 # number of iterations to run
-    cooldown_frac = 0.45 # fraction of training spent cooling down the learning rate
+    #num_iterations = 1750 # number of iterations to run
+    num_iterations = 13125 # when using 3B tokens ADDED
+    # num_iterations = 3500 # if number of iterations to run (doubled for 4 GPUs to match 8-GPU token count) ADDED
+    #cooldown_frac = 0.45 # fraction of training spent cooling down the learning rate
+    cooldown_frac = 0.95 # fraction of training spent cooling down the learning rate ADDED
     # evaluation and logging
-    val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
+    # val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
+    val_loss_every = 500 # every how many steps to evaluate val loss? 0 for only at the end ADDED
     save_checkpoint = False
 args = Hyperparameters()
+
+# Parse command line arguments
+parser = argparse.ArgumentParser()
+parser.add_argument('-lr_multiplier', type=float, default=1.0, help='Learning rate multiplier')
+parser.add_argument('-cooldown_frac', type=float, default=0.95, help='Fraction of training for cooldown')
+cmd_args = parser.parse_args()
+
+# Override default hyperparameters with command line arguments
+args.cooldown_frac = cmd_args.cooldown_frac
+lr_multiplier = cmd_args.lr_multiplier
 
 # torchrun sets these env variables
 rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
-assert world_size == 8 # this code is designed for 8xH100
+# assert world_size == 8 # this code is designed for 8xH100
+assert world_size == 4 # this code is designed for 4 GPUs
 assert torch.cuda.is_available()
 device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
 torch.cuda.set_device(device)
@@ -618,11 +644,25 @@ embed_params = [p for n, p in model.named_parameters() if "embed" in n]
 scalar_params = [p for p in model.parameters() if p.ndim < 2]
 head_params = [model.lm_head.weight]
 
-# init the optimizer(s)
+# Option 1: Use Adam for ALL parameters (CORRECTED - safe for DistAdam)
+# Uncomment the lines below and comment out the dual optimizer setup to use Adam for everything
+# all_params = hidden_matrix_params + embed_params + scalar_params + head_params
+# optimizer = DistAdam(all_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+# optimizers = [optimizer]
+
+# Option 2: Use Adam with different learning rates for different parameter groups (CORRECTED)
+# Uncomment the lines below and comment out the dual optimizer setup for grouped Adam optimization
+# all_params = hidden_matrix_params + embed_params + scalar_params + head_params
+# optimizer = DistAdam(all_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+# # You can still set different lr_mul attributes on parameters if needed:
+# # for p in hidden_matrix_params: p.lr_mul = 0.5  # Example: half learning rate
+# optimizers = [optimizer]
+
+# Current setup: Dual optimizer (DistAdam + Muon)
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
-optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
-optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, weight_decay=0.0)
+optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+optimizer2 = Muon(hidden_matrix_params, lr=0.05 * lr_multiplier, momentum=0.95, weight_decay=0.0)
 optimizers = [optimizer1, optimizer2]
 for opt in optimizers:
     for group in opt.param_groups:
@@ -683,6 +723,11 @@ torch.cuda.synchronize()
 t0 = time.perf_counter()
 # begin training
 train_steps = args.num_iterations
+if master_process and wandb is not None:
+    wandb.init(project="modded-nanogpt", name=f"run-{run_id}", config={
+        "lr_multiplier": lr_multiplier,
+        "cooldown_frac": args.cooldown_frac,
+    })
 for step in range(train_steps + 1):
     last_step = (step == train_steps)
 
@@ -705,6 +750,10 @@ for step in range(train_steps + 1):
         del val_loader
         dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
         print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
+        
+        # Log to wandb
+        if master_process and wandb is not None:
+            wandb.log({"val_loss": val_loss.item(), "step": step})
         model.train()
         # start the clock again
         torch.cuda.synchronize()
