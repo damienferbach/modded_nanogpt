@@ -644,26 +644,15 @@ embed_params = [p for n, p in model.named_parameters() if "embed" in n]
 scalar_params = [p for p in model.parameters() if p.ndim < 2]
 head_params = [model.lm_head.weight]
 
-# Option 1: Use Adam for ALL parameters (CORRECTED - safe for DistAdam)
-# Uncomment the lines below and comment out the dual optimizer setup to use Adam for everything
-# all_params = hidden_matrix_params + embed_params + scalar_params + head_params
-# optimizer = DistAdam(all_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
-# optimizers = [optimizer]
-
-# Option 2: Use Adam with different learning rates for different parameter groups (CORRECTED)
-# Uncomment the lines below and comment out the dual optimizer setup for grouped Adam optimization
-# all_params = hidden_matrix_params + embed_params + scalar_params + head_params
-# optimizer = DistAdam(all_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
-# # You can still set different lr_mul attributes on parameters if needed:
-# # for p in hidden_matrix_params: p.lr_mul = 0.5  # Example: half learning rate
-# optimizers = [optimizer]
-
-# Current setup: Dual optimizer (DistAdam + Muon)
+# Current setup: Single AdamW optimizer for all parameters (Muon/DistAdam disabled)
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
-optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
-optimizer2 = Muon(hidden_matrix_params, lr=0.05 * lr_multiplier, momentum=0.95, weight_decay=0.0)
-optimizers = [optimizer1, optimizer2]
+# optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+# optimizer2 = Muon(hidden_matrix_params, lr=0.05 * lr_multiplier, momentum=0.95, weight_decay=0.0)
+# optimizers = [optimizer1, optimizer2]
+all_params = list(model.parameters())
+optimizer = torch.optim.AdamW(all_params, lr=0.008, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+optimizers = [optimizer]
 for opt in optimizers:
     for group in opt.param_groups:
         group["initial_lr"] = group["lr"]
@@ -774,9 +763,10 @@ for step in range(train_steps + 1):
     for opt in optimizers:
         for group in opt.param_groups:
             group["lr"] = group["initial_lr"] * get_lr(step)
-    for group in optimizer2.param_groups:
-        frac = min(step / 300, 1) # momentum warmup for muon
-        group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
+    # Muon warmup disabled (using single AdamW)
+    # for group in optimizer2.param_groups:
+    #     frac = min(step / 300, 1) # momentum warmup for muon
+    #     group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
     # step the optimizers
     for opt in optimizers:
         opt.step()
