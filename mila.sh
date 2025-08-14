@@ -13,9 +13,17 @@ source $SCRATCH/keller/bin/activate
 # Set wandb API key (get from https://wandb.ai/authorize)
 export WANDB_API_KEY=bece9f2099e3e85e0ae9922002616cf20bd26946
 
-for lr_multiplier in 0.4; do
-    for cooldown_frac in 0.95 0.5; do
-        echo "Running with lr_multiplier=$lr_multiplier, cooldown_frac=$cooldown_frac"
-        torchrun --standalone --nproc_per_node=4 train_gpt.py -lr_multiplier $lr_multiplier -cooldown_frac $cooldown_frac
+for lr_multiplier in 2. 4. 8.; do
+    for cooldown_frac in 0.5; do
+        for warmup_frac in 0.02; do
+            for weight_decay in 1e-3; do
+                echo "Running with lr_multiplier=$lr_multiplier, cooldown_frac=$cooldown_frac, warmup_frac=$warmup_frac, weight_decay=$weight_decay"
+                torchrun --standalone --nproc_per_node=4 train_gpt_modded.py \
+                    -lr_multiplier $lr_multiplier \
+                    -cooldown_frac $cooldown_frac \
+                    -warmup_frac $warmup_frac \
+                    -weight_decay $weight_decay
+            done
+        done
     done
 done

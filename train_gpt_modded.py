@@ -577,20 +577,26 @@ class Hyperparameters:
     # num_iterations = 3500 # if number of iterations to run (doubled for 4 GPUs to match 8-GPU token count) ADDED
     #cooldown_frac = 0.45 # fraction of training spent cooling down the learning rate
     cooldown_frac = 0.95 # fraction of training spent cooling down the learning rate ADDED
+    warmup_frac = 0.02 # fraction of training for warmup
     # evaluation and logging
     # val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
     val_loss_every = 500 # every how many steps to evaluate val loss? 0 for only at the end ADDED
     save_checkpoint = False
+    weight_decay = 0.0
 args = Hyperparameters()
 
 # Parse command line arguments
 parser = argparse.ArgumentParser()
 parser.add_argument('-lr_multiplier', type=float, default=1.0, help='Learning rate multiplier')
 parser.add_argument('-cooldown_frac', type=float, default=0.95, help='Fraction of training for cooldown')
+parser.add_argument('-warmup_frac', type=float, default=0.02, help='Fraction of training for warmup')
+parser.add_argument('-weight_decay', type=float, default=0.0, help='Weight decay')
 cmd_args = parser.parse_args()
 
 # Override default hyperparameters with command line arguments
 args.cooldown_frac = cmd_args.cooldown_frac
+args.warmup_frac = cmd_args.warmup_frac
+args.weight_decay = cmd_args.weight_decay
 lr_multiplier = cmd_args.lr_multiplier
 
 # torchrun sets these env variables
@@ -647,21 +653,30 @@ head_params = [model.lm_head.weight]
 # Current setup: Single AdamW optimizer for all parameters (Muon/DistAdam disabled)
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
-optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
-optimizer2 = Muon(hidden_matrix_params, lr=0.05 * lr_multiplier, momentum=0.95, weight_decay=0.0)
-optimizers = [optimizer1, optimizer2]
-
+# optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+# optimizer2 = Muon(hidden_matrix_params, lr=0.05 * lr_multiplier, momentum=0.95, weight_decay=0.0)
+# optimizers = [optimizer1, optimizer2]
+all_params = list(model.parameters())
+optimizer = torch.optim.AdamW(all_params, lr=0.008 * lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=args.weight_decay)
+optimizers = [optimizer]
 for opt in optimizers:
     for group in opt.param_groups:
         group["initial_lr"] = group["lr"]
 
-# learning rate schedule: stable then decay
+# learning rate schedule: warmup, stable, then decay
 def get_lr(step: int):
     x = step / args.num_iterations # progress in training
     assert 0 <= x < 1
-    if x < 1 - args.cooldown_frac:
+    assert args.cooldown_frac + args.warmup_frac <= 1
+    
+    if x < args.warmup_frac:
+        # Linear warmup from 0 to 1
+        return x / args.warmup_frac
+    elif x < 1 - args.cooldown_frac:
+        # Stable at full learning rate
         return 1.0
     else:
+        # Linear decay from 1.0 to 0.1
         w = (1 - x) / args.cooldown_frac
         return w * 1.0 + (1 - w) * 0.1
 
@@ -714,6 +729,8 @@ if master_process and wandb is not None:
     wandb.init(project="modded-nanogpt", name=f"run-{run_id}", config={
         "lr_multiplier": lr_multiplier,
         "cooldown_frac": args.cooldown_frac,
+        "warmup_frac": args.warmup_frac,
+        "weight_decay": args.weight_decay,
     })
 for step in range(train_steps + 1):
     last_step = (step == train_steps)
