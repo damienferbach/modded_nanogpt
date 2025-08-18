@@ -655,7 +655,7 @@ head_params = [model.lm_head.weight]
 # optimizer2 = Muon(hidden_matrix_params, lr=0.05 * args.lr_multiplier, momentum=0.95, weight_decay=0.0)
 # optimizers = [optimizer1, optimizer2]
 all_params = list(model.parameters())
-optimizer = torch.optim.AdamW(all_params, lr=0.008 * args.lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=args.weight_decay)
+optimizer = torch.optim.AdamW(all_params, lr=0.008 * args.lr_multiplier, betas=(0.9, 0.95), eps=1e-10, weight_decay=args.weight_decay)
 optimizers = [optimizer]
 for opt in optimizers:
     for group in opt.param_groups:
@@ -724,7 +724,17 @@ t0 = time.perf_counter()
 # begin training
 train_steps = args.num_iterations
 if master_process and wandb is not None:
-    wandb.init(project="modded-nanogpt", name=f"run-{run_id}", config=asdict(args))
+    config = {
+        "batch_per_device": args.batch_per_device,  
+        "cooldown_frac": args.cooldown_frac,
+        "lr_multiplier": args.lr_multiplier,
+        "warmup_frac": args.warmup_frac,
+        "weight_decay": args.weight_decay,
+        "train_seq_len": args.train_seq_len,
+        "world_size": dist.get_world_size(),
+        "val_seq_len": args.val_seq_len,
+    }
+    wandb.init(project="modded-nanogpt", name=f"run-{run_id}", config=config)
 
 # tokens processed accounting (exclude warmup)
 tokens_processed = 0
