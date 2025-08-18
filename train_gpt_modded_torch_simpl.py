@@ -32,7 +32,6 @@ from torch.nn.attention.flex_attention import BlockMask, flex_attention
 
 @torch.library.custom_op("nanogpt::mm", mutates_args=())
 def mm_op(x: Tensor, w: Tensor, x_s: float, w_s: float, grad_s: float) -> tuple[Tensor, Tensor, Tensor]:
-    @torch.compile
     def impl(x: Tensor, w: Tensor):
         assert x.is_contiguous() and w.is_contiguous()
         x_f8 = x.div(x_s).to(torch.float8_e4m3fn)
@@ -59,7 +58,6 @@ def _(x: Tensor, w: Tensor, *_):
 
 @torch.library.custom_op("nanogpt::mm_backward", mutates_args=())
 def mm_backward_op(g: Tensor, x_f8: Tensor, w_f8: Tensor, x_s: float, w_s: float, grad_s: float) -> tuple[Tensor, Tensor]:
-    @torch.compile
     def impl(grad: Tensor, x_f8: Tensor, w_f8: Tensor):
         assert grad.is_contiguous()
         x_inv_s = grad.new_tensor(x_s, dtype=torch.float32)
@@ -111,7 +109,6 @@ mm_op.register_autograd(backward, setup_context=setup_context)
 # -----------------------------------------------------------------------------
 # Muon optimizer
 
-@torch.compile
 def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
@@ -222,7 +219,6 @@ class DistAdam(torch.optim.Optimizer):
         super().__init__(param_groups, defaults)
         # DistributedAdam implementation by @vagrawal
 
-    @torch.compile
     @torch.no_grad()
     def step(self):
         rank = dist.get_rank()
@@ -690,7 +686,8 @@ def get_window_size_blocks(step: int):
     window_size = next_multiple_of_n(1728 * x, n=128)
     return get_window_size_blocks_helper(window_size)
 
-model: nn.Module = torch.compile(model, dynamic=False)
+# Disable torch.compile for broader compatibility; keep model in eager mode
+model: nn.Module = model
 
 ########################################
 #            Warmup kernels            #
