@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, asdict
 from functools import lru_cache, partial # Added partial for hook registration
 from pathlib import Path
-from tanea_pytorch import create_tanea_optimizer
+# from tanea_pytorch import create_tanea_optimizer
 
 try:
     import wandb
@@ -665,14 +665,15 @@ head_params = [model.lm_head.weight]
 
 optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008 * args.lr_multiplier_1, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
 # Use TANEA for hidden matrix parameters
-optimizer2 = create_tanea_optimizer(
-    hidden_matrix_params,
-    # Set base schedules; you can adjust g2/g3 as needed
-    g2=1e-4,
-    g3=1e-5,
-    weight_decay=args.weight_decay,
-    momentum_flavor="effective-clip",
-)
+# optimizer2 = create_tanea_optimizer(
+#     hidden_matrix_params,
+#     # Set base schedules; you can adjust g2/g3 as needed
+#     g2=1e-4,
+#     g3=1e-5,
+#     weight_decay=args.weight_decay,
+#     momentum_flavor="effective-clip",
+# )
+optimizer2 = torch.optim.AdamW(hidden_matrix_params, lr=0.008 * args.lr_multiplier_2, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
 # Compile the AdamW optimizer step for better performance
 # optimizer2.step = torch.compile(optimizer2.step, fullgraph=False)
 
