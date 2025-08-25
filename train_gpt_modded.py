@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass, asdict
 from functools import lru_cache, partial # Added partial for hook registration
 from pathlib import Path
+from tanea_pytorch import create_tanea_optimizer
 
 try:
     import wandb
@@ -420,11 +421,11 @@ class GPT(nn.Module):
         ]))
         # set learning rates
         for param in self.embed.parameters():
-            param.lr_mul = 1. #75. ADDED
+            param.lr_mul = 75. # ADDED
         for param in self.value_embeds.parameters():
-            param.lr_mul = 1. #75. ADDED
-        self.lm_head.weight.lr_mul = 1. #27.5 ADDED
-        self.scalars.lr_mul = 1. #5.0 ADDED
+            param.lr_mul = 75. # ADDED
+        self.lm_head.weight.lr_mul = 27.5 # ADDED
+        self.scalars.lr_mul = 5.0 # ADDED
 
     def create_blockmasks(self, input_seq: Tensor, sliding_window_num_blocks: Tensor):
         BLOCK_SIZE = 128
@@ -562,7 +563,8 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, align_to_
 
 # Parse command line arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('-lr_multiplier', type=float, default=1.0, help='Learning rate multiplier')
+parser.add_argument('-lr_multiplier_1', type=float, default=1.0, help='Learning rate multiplier')
+parser.add_argument('-lr_multiplier_2', type=float, default=1.0, help='Learning rate multiplier')
 parser.add_argument('-cooldown_frac', type=float, default=0.95, help='Fraction of training for cooldown')
 parser.add_argument('-warmup_frac', type=float, default=0.02, help='Fraction of training for warmup')
 parser.add_argument('-weight_decay', type=float, default=0.0, help='Weight decay')
@@ -594,7 +596,8 @@ class Hyperparameters:
     save_checkpoint = False
     weight_decay = cmd_args.weight_decay
     batch_per_device = cmd_args.batch_per_device
-    lr_multiplier = cmd_args.lr_multiplier
+    lr_multiplier_1 = cmd_args.lr_multiplier_1
+    lr_multiplier_2 = cmd_args.lr_multiplier_2
 args = Hyperparameters()
 
 # torchrun sets these env variables
@@ -654,12 +657,31 @@ head_params = [model.lm_head.weight]
 # optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008 * args.lr_multiplier, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
 # optimizer2 = Muon(hidden_matrix_params, lr=0.05 * args.lr_multiplier, momentum=0.95, weight_decay=0.0)
 # optimizers = [optimizer1, optimizer2]
-all_params = list(model.parameters())
-optimizer = torch.optim.AdamW(all_params, lr=0.008 * args.lr_multiplier, betas=(0.9, 0.95), eps=1e-10, weight_decay=args.weight_decay)
-optimizers = [optimizer]
+
+
+# all_params = list(model.parameters())
+# optimizer = torch.optim.AdamW(all_params, lr=0.008 * args.lr_multiplier, betas=(0.9, 0.95), eps=1e-10, weight_decay=args.weight_decay)
+# optimizers = [optimizer]
+
+optimizer1 = DistAdam(scalar_params + head_params + embed_params, lr=0.008 * args.lr_multiplier_1, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0)
+# Use TANEA for hidden matrix parameters
+optimizer2 = create_tanea_optimizer(
+    hidden_matrix_params,
+    # Set base schedules; you can adjust g2/g3 as needed
+    g2=1e-4,
+    g3=1e-5,
+    weight_decay=args.weight_decay,
+    momentum_flavor="effective-clip",
+)
+# Compile the AdamW optimizer step for better performance
+# optimizer2.step = torch.compile(optimizer2.step, fullgraph=False)
+
+optimizers = [optimizer1, optimizer2]
+
 for opt in optimizers:
     for group in opt.param_groups:
-        group["initial_lr"] = group["lr"]
+        if "lr" in group:
+            group["initial_lr"] = group["lr"]
 
 # learning rate schedule: warmup, stable, then decay
 def get_lr(step: int):
@@ -727,7 +749,8 @@ if master_process and wandb is not None:
     config = {
         "batch_per_device": args.batch_per_device,  
         "cooldown_frac": args.cooldown_frac,
-        "lr_multiplier": args.lr_multiplier,
+        "lr_multiplier_1": args.lr_multiplier_1,
+        "lr_multiplier_2": args.lr_multiplier_2,
         "warmup_frac": args.warmup_frac,
         "weight_decay": args.weight_decay,
         "train_seq_len": args.train_seq_len,
@@ -793,7 +816,8 @@ for step in range(train_steps + 1):
     # set optimization hyperparameters
     for opt in optimizers:
         for group in opt.param_groups:
-            group["lr"] = group["initial_lr"] * get_lr(step)
+            if "lr" in group:
+                group["lr"] = group["initial_lr"] * get_lr(step)
     # Muon warmup disabled (using single AdamW)
     # for group in optimizer2.param_groups:
     #     frac = min(step / 300, 1) # momentum warmup for muon
